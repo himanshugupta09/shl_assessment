@@ -6,3 +6,4 @@ src/__pycache__/
 .idea/
 *.log
 GenAI_SampleConversations
+faiss_index.bin
