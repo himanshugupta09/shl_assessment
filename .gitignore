@@ -2,8 +2,7 @@ venv
 .env
 src/__pycache__/
 *.pyc
-.DS_Store
+
 .idea/
 *.log
 GenAI_SampleConversations
-faiss_index.bin
