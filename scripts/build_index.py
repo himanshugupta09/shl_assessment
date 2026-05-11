@@ -3,7 +3,8 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 import os
-
+model = SentenceTransformer('all-MiniLM-L6-v2')
+model.save('./models/all-MiniLM-L6-v2')  # commit this to git
 INPUT_JSON = "../data/shl_catalog.json"
 OUTPUT_INDEX = "../data/faiss_index.bin"
 
@@ -21,7 +22,7 @@ def build_vector_index():
 
     print("Loading embedding model (this may take a minute on first run)...")
     # all-MiniLM-L6-v2 is a great, fast, open-source model for local embeddings
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    
 
     print(f"Generating embeddings for {len(texts_to_embed)} items...")
     embeddings = model.encode(texts_to_embed, convert_to_numpy=True)
