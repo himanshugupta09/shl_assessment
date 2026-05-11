@@ -38,6 +38,19 @@ CRITICAL RULES FOR EVALUATION:
 6. COMPLETION: Once you provide a highly relevant shortlist (1-10 items) that satisfies the user's constraints, set 'end_of_conversation' to true.
 """
 
+_embedder = None
+_faiss_index = None
+_catalog = None
+
+def get_resources():
+    global _embedder, _faiss_index, _catalog
+    if _embedder is None:
+        print("Loading FAISS Index and Embedding Model...")
+        _catalog = json.load(open("data/shl_catalog.json"))
+        _faiss_index = faiss.read_index("data/faiss_index.bin")
+        _embedder = SentenceTransformer('./models/all-MiniLM-L6-v2')
+    return _embedder, _faiss_index, _catalog
+
 def retrieve_context(query: str, top_k: int = 30) -> str:
     """Searches the FAISS index and returns the most relevant catalog items."""
     # Embed the user's query
