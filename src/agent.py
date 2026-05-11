@@ -21,7 +21,9 @@ with open(CATALOG_PATH, 'r', encoding='utf-8') as f:
     shl_catalog = json.load(f)
 
 faiss_index = faiss.read_index(INDEX_PATH)
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+import os
+MODEL_PATH = os.getenv("MODEL_PATH", "./models/all-MiniLM-L6-v2")
+embedder = SentenceTransformer(MODEL_PATH)
 
 SYSTEM_PROMPT = """
 You are an expert assessment recommender for SHL Labs. 
