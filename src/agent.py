@@ -1,10 +1,10 @@
 import os
 import gc
 import json
+import pickle
 import traceback
 import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -14,46 +14,38 @@ load_dotenv()
 client = genai.Client()
 
 # ── Lazy-loaded resources ────────────────────────────────────────────────────
+# No sentence-transformers, no FAISS, no torch.
+# TF-IDF + sklearn = ~5 MB RAM total.
 
-_embedder    = None
-_faiss_index = None
+_vectorizer  = None
+_tfidf_matrix = None
 _catalog     = None
-_load_error  = None   # store any load failure so /chat can return 503 not 502
+_load_error  = None
 
 def get_resources():
-    global _embedder, _faiss_index, _catalog, _load_error
+    global _vectorizer, _tfidf_matrix, _catalog, _load_error
 
     if _load_error is not None:
         raise RuntimeError(f"Resource load previously failed: {_load_error}")
 
-    if _embedder is None:
+    if _vectorizer is None:
         try:
-            print("[startup] Loading catalog...")
             catalog_path = os.getenv("CATALOG_PATH", "data/shl_catalog.json")
+            vec_path     = os.getenv("VECTORIZER_PATH", "data/tfidf_vectorizer.pkl")
+            mat_path     = os.getenv("MATRIX_PATH",     "data/tfidf_matrix.pkl")
+
+            print("[startup] Loading catalog...")
             with open(catalog_path, "r", encoding="utf-8") as f:
                 _catalog = json.load(f)
             print(f"[startup] Catalog loaded: {len(_catalog)} items")
 
-            print("[startup] Loading FAISS index...")
-            index_path = os.getenv("INDEX_PATH", "data/faiss_index.bin")
-            _faiss_index = faiss.read_index(index_path)
-            print(f"[startup] FAISS index loaded: {_faiss_index.ntotal} vectors, dim={_faiss_index.d}")
+            print("[startup] Loading TF-IDF vectorizer...")
+            with open(vec_path, "rb") as f:
+                _vectorizer = pickle.load(f)
 
-            # Force GC before loading the model to free any temp allocations
-            gc.collect()
-
-            print("[startup] Loading embedding model...")
-            model_path = os.getenv("MODEL_PATH", "./models/paraphrase-MiniLM-L3-v2")
-            _embedder = SentenceTransformer(model_path)
-
-            # float16 halves model RAM — safe for inference, not training
-            import torch
-            if torch.cuda.is_available():
-                _embedder = _embedder.half()
-            else:
-                # On CPU, float16 can be slow on some platforms; use float32 but
-                # still reduce via torch compile if available
-                pass
+            print("[startup] Loading TF-IDF matrix...")
+            with open(mat_path, "rb") as f:
+                _tfidf_matrix = pickle.load(f)
 
             gc.collect()
             print("[startup] All resources loaded successfully.")
@@ -63,7 +55,7 @@ def get_resources():
             traceback.print_exc()
             raise
 
-    return _embedder, _faiss_index, _catalog
+    return _vectorizer, _tfidf_matrix, _catalog
 
 # ── Prompt ───────────────────────────────────────────────────────────────────
 
@@ -89,19 +81,18 @@ CRITICAL RULES FOR EVALUATION:
    satisfies the user's constraints, set 'end_of_conversation' to true.
 """
 
-# ── RAG retrieval ────────────────────────────────────────────────────────────
+# ── TF-IDF retrieval ─────────────────────────────────────────────────────────
 
 def retrieve_context(query: str, top_k: int = 30) -> str:
-    embedder, faiss_index, catalog = get_resources()
+    vectorizer, tfidf_matrix, catalog = get_resources()
 
-    query_vector = embedder.encode([query], convert_to_numpy=True).astype(np.float32)
-    faiss.normalize_L2(query_vector)
-
-    distances, indices = faiss_index.search(query_vector, top_k)
+    query_vec = vectorizer.transform([query])
+    scores    = cosine_similarity(query_vec, tfidf_matrix).flatten()
+    top_indices = np.argsort(scores)[::-1][:top_k]
 
     context_chunks = []
-    for idx in indices[0]:
-        if idx != -1:
+    for idx in top_indices:
+        if scores[idx] > 0:
             item = catalog[idx]
             context_chunks.append(
                 f"Name: {item['name']} | Type: {item['test_type']} "

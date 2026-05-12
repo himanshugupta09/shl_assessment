@@ -1,76 +1,46 @@
 import os, sys, json
 import numpy as np
 import dotenv
+dotenv.load_dotenv()
 print("=" * 50)
 print("SHL Deployment Pre-flight Check")
 print("=" * 50)
-dotenv.load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-errors = []
 
+errors = []
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 # 1. Check data files
-for path in ["../data/shl_catalog.json", "../data/faiss_index.bin"]:
+for path in ["../data/shl_catalog.json", "../data/tfidf_vectorizer.pkl", "../data/tfidf_matrix.pkl"]:
     if os.path.exists(path):
         size = os.path.getsize(path) / 1024
         print(f"  ✅ {path} ({size:.0f} KB)")
     else:
-        print(f"  ❌ MISSING: {path}")
+        print(f"  ❌ MISSING: {path}  →  run: python scripts/build_tfidf_index.py")
         errors.append(path)
 
-# 2. Check model
-model_paths = [
-    "../models/paraphrase-MiniLM-L3-v2",
-    "../models/all-MiniLM-L6-v2",
-]
-model_found = None
-for mp in model_paths:
-    if os.path.exists(mp):
-        print(f"  ✅ Model found: {mp}")
-        model_found = mp
-        break
-if not model_found:
-    print("  ❌ MISSING: No model found in ./models/")
-    errors.append("model")
-
-# 3. Check FAISS + model dimension match
+# 2. Test retrieval if files exist
 if not errors:
-    import faiss
-    from sentence_transformers import SentenceTransformer
+    import pickle
+    from sklearn.metrics.pairwise import cosine_similarity
 
-    index = faiss.read_index("../data/faiss_index.bin")
-    print(f"\n  FAISS index: {index.ntotal} vectors, dim={index.d}")
-
-    model = SentenceTransformer(model_found)
-    test_vec = model.encode(["test query"], convert_to_numpy=True)
-    print(f"  Model output dim: {test_vec.shape[1]}")
-
-    if index.d != test_vec.shape[1]:
-        print(f"\n  ❌ DIMENSION MISMATCH: index={index.d}, model={test_vec.shape[1]}")
-        print("     You must rebuild faiss_index.bin with the current model.")
-        print("     Run: python scripts/build_index.py")
-        errors.append("dimension_mismatch")
-    else:
-        print("  ✅ Dimensions match — FAISS index is compatible with model")
-
-    # 4. Quick search test
-    test_vec = test_vec.astype(np.float32)
-    faiss.normalize_L2(test_vec)
-    D, I = index.search(test_vec, 3)
-    print(f"  ✅ FAISS search works — top result index: {I[0][0]}")
-
-    # 5. Catalog load
+    with open("../data/tfidf_vectorizer.pkl", "rb") as f:
+        vectorizer = pickle.load(f)
+    with open("../data/tfidf_matrix.pkl", "rb") as f:
+        matrix = pickle.load(f)
     with open("../data/shl_catalog.json") as f:
         catalog = json.load(f)
-    print(f"  ✅ Catalog loaded: {len(catalog)} items")
 
-# 6. Check env
+    q = vectorizer.transform(["Java developer test"])
+    scores = cosine_similarity(q, matrix).flatten()
+    top = np.argsort(scores)[::-1][0]
+    print(f"  ✅ TF-IDF search works — top result: '{catalog[top]['name']}'")
+
+# 3. Check env
 print("\n  Env vars:")
-for var in ["GEMINI_API_KEY", "MODEL_PATH", "CATALOG_PATH", "INDEX_PATH"]:
+for var in ["GEMINI_API_KEY"]:
     val = os.getenv(var)
-    if var == "GEMINI_API_KEY":
-        print(f"    {'✅' if val else '❌'} {var}: {'set' if val else 'MISSING'}")
-    else:
-        print(f"    {'✅' if val else '⚠️ '} {var}: {val or 'not set (using default)'}")
+    print(f"    {'✅' if val else '❌'} {var}: {'set' if val else 'MISSING — add to .env and Railway Variables'}")
+    if not val:
+        errors.append(var)
 
 print("\n" + "=" * 50)
 if errors:
