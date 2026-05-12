@@ -1,5 +1,7 @@
 import os
+import gc
 import json
+import traceback
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -8,33 +10,58 @@ from google import genai
 from google.genai import types
 from src.models import ChatResponse
 
-# Load environment variables
 load_dotenv()
 client = genai.Client()
 
 # ── Lazy-loaded resources ────────────────────────────────────────────────────
-# Nothing heavy is loaded at import time.
-# get_resources() loads on the FIRST real request, so uvicorn can bind to the
-# port and pass Railway's health-check before any RAM spike occurs.
 
-_embedder = None
+_embedder    = None
 _faiss_index = None
-_catalog = None
+_catalog     = None
+_load_error  = None   # store any load failure so /chat can return 503 not 502
 
 def get_resources():
-    global _embedder, _faiss_index, _catalog
+    global _embedder, _faiss_index, _catalog, _load_error
+
+    if _load_error is not None:
+        raise RuntimeError(f"Resource load previously failed: {_load_error}")
+
     if _embedder is None:
-        print("Loading FAISS Index and Embedding Model...")
-        catalog_path = os.getenv("CATALOG_PATH", "data/shl_catalog.json")
-        index_path   = os.getenv("INDEX_PATH",   "data/faiss_index.bin")
-        model_path   = os.getenv("MODEL_PATH",   "./models/all-MiniLM-L6-v2")
+        try:
+            print("[startup] Loading catalog...")
+            catalog_path = os.getenv("CATALOG_PATH", "data/shl_catalog.json")
+            with open(catalog_path, "r", encoding="utf-8") as f:
+                _catalog = json.load(f)
+            print(f"[startup] Catalog loaded: {len(_catalog)} items")
 
-        with open(catalog_path, "r", encoding="utf-8") as f:
-            _catalog = json.load(f)
+            print("[startup] Loading FAISS index...")
+            index_path = os.getenv("INDEX_PATH", "data/faiss_index.bin")
+            _faiss_index = faiss.read_index(index_path)
+            print(f"[startup] FAISS index loaded: {_faiss_index.ntotal} vectors, dim={_faiss_index.d}")
 
-        _faiss_index = faiss.read_index(index_path)
-        _embedder    = SentenceTransformer(model_path)
-        print("Resources loaded successfully.")
+            # Force GC before loading the model to free any temp allocations
+            gc.collect()
+
+            print("[startup] Loading embedding model...")
+            model_path = os.getenv("MODEL_PATH", "./models/paraphrase-MiniLM-L3-v2")
+            _embedder = SentenceTransformer(model_path)
+
+            # float16 halves model RAM — safe for inference, not training
+            import torch
+            if torch.cuda.is_available():
+                _embedder = _embedder.half()
+            else:
+                # On CPU, float16 can be slow on some platforms; use float32 but
+                # still reduce via torch compile if available
+                pass
+
+            gc.collect()
+            print("[startup] All resources loaded successfully.")
+
+        except Exception as e:
+            _load_error = str(e)
+            traceback.print_exc()
+            raise
 
     return _embedder, _faiss_index, _catalog
 
@@ -65,10 +92,9 @@ CRITICAL RULES FOR EVALUATION:
 # ── RAG retrieval ────────────────────────────────────────────────────────────
 
 def retrieve_context(query: str, top_k: int = 30) -> str:
-    """Embed the query, search FAISS, return formatted catalog snippets."""
-    embedder, faiss_index, catalog = get_resources()   # ← always use lazy loader
+    embedder, faiss_index, catalog = get_resources()
 
-    query_vector = embedder.encode([query], convert_to_numpy=True)
+    query_vector = embedder.encode([query], convert_to_numpy=True).astype(np.float32)
     faiss.normalize_L2(query_vector)
 
     distances, indices = faiss_index.search(query_vector, top_k)
@@ -87,7 +113,6 @@ def retrieve_context(query: str, top_k: int = 30) -> str:
 # ── Agent entry-point ────────────────────────────────────────────────────────
 
 async def run_agent(messages: list) -> dict:
-    # Build conversation history for the Gemini chat (all turns except the last)
     formatted_history = []
     for msg in messages[:-1]:
         role = "user" if msg.role == "user" else "model"
@@ -97,7 +122,6 @@ async def run_agent(messages: list) -> dict:
 
     latest_msg = messages[-1].content
 
-    # Combine ALL user messages so FAISS gets full conversation context
     combined_search_query = " ".join(
         msg.content for msg in messages if msg.role == "user"
     )

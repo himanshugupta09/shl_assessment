@@ -4,7 +4,8 @@ import faiss
 from sentence_transformers import SentenceTransformer
 import os
 
-model.save('./models/all-MiniLM-L6-v2')  # commit this to git
+model = SentenceTransformer('all-MiniLM-L6-v2')
+model.save('../models/all-MiniLM-L6-v2')  
 INPUT_JSON = "../data/shl_catalog.json"
 OUTPUT_INDEX = "../data/faiss_index.bin"
 
